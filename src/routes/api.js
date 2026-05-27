@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
+const sharp = require('sharp');
 const { db } = require('../db');
 const { makeSlug, stripHtml } = require('../utils');
 const { getAllSettings, setSettings } = require('../settings');
@@ -24,6 +25,18 @@ function requireOwner(req, res, next) {
   return res.status(403).json({ error: 'Доступ только для владельца' });
 }
 
+function isOwner(req) {
+  return req.session && req.session.admin && req.session.admin.role === 'owner';
+}
+
+function requireNewsOwner(req, res, next) {
+  if (isOwner(req)) return next();
+  const row = db.prepare('SELECT author_id FROM news WHERE id = ?').get(Number(req.params.id));
+  if (!row) return res.status(404).json({ error: 'Новость не найдена' });
+  if (row.author_id === req.session.admin.id) return next();
+  return res.status(403).json({ error: 'Можно редактировать только свои новости' });
+}
+
 // ─────────────────────────────────────────────
 // Uploads
 // ─────────────────────────────────────────────
@@ -31,17 +44,8 @@ function requireOwner(req, res, next) {
 const UPLOADS_DIR = path.join(__dirname, '..', '..', 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || '').toLowerCase().slice(0, 10);
-    const rand = Math.random().toString(36).slice(2, 10);
-    cb(null, `${Date.now()}-${rand}${ext}`);
-  },
-});
-
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (!file.mimetype || !file.mimetype.startsWith('image/')) {
@@ -52,10 +56,29 @@ const upload = multer({
 });
 
 router.post('/upload', requireAuth, (req, res) => {
-  upload.single('file')(req, res, (err) => {
+  upload.single('file')(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message || 'Ошибка загрузки' });
     if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
-    res.json({ ok: true, url: `/uploads/${req.file.filename}` });
+    try {
+      const rand = Math.random().toString(36).slice(2, 10);
+      const filename = `${Date.now()}-${rand}.webp`;
+      const target = path.join(UPLOADS_DIR, filename);
+      await sharp(req.file.buffer)
+        .rotate()
+        .resize({ width: 1800, height: 1800, fit: 'inside', withoutEnlargement: true })
+        .webp({ quality: 82, effort: 5 })
+        .toFile(target);
+      const optimizedSize = fs.statSync(target).size;
+      res.json({
+        ok: true,
+        url: `/uploads/${filename}`,
+        format: 'webp',
+        original_size: req.file.size,
+        optimized_size: optimizedSize,
+      });
+    } catch (e) {
+      res.status(400).json({ error: e.message || 'Не удалось оптимизировать изображение' });
+    }
   });
 });
 
@@ -96,7 +119,7 @@ router.get('/categories', (req, res) => {
   res.json({ categories: cats });
 });
 
-router.post('/categories', requireAuth, (req, res) => {
+router.post('/categories', requireAuth, requireOwner, (req, res) => {
   const { name, slug, sort_order } = req.body || {};
   if (!name) return res.status(400).json({ error: 'Название обязательно' });
   const finalSlug = ensureUniqueCategorySlug(slug || makeSlug(name));
@@ -106,7 +129,7 @@ router.post('/categories', requireAuth, (req, res) => {
   res.json({ ok: true, id: info.lastInsertRowid });
 });
 
-router.put('/categories/:id', requireAuth, (req, res) => {
+router.put('/categories/:id', requireAuth, requireOwner, (req, res) => {
   const id = Number(req.params.id);
   const cat = db.prepare('SELECT * FROM categories WHERE id = ?').get(id);
   if (!cat) return res.status(404).json({ error: 'Рубрика не найдена' });
@@ -122,7 +145,7 @@ router.put('/categories/:id', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-router.delete('/categories/:id', requireAuth, (req, res) => {
+router.delete('/categories/:id', requireAuth, requireOwner, (req, res) => {
   const id = Number(req.params.id);
   db.prepare('UPDATE news SET category_id = NULL WHERE category_id = ?').run(id);
   db.prepare('DELETE FROM categories WHERE id = ?').run(id);
@@ -179,6 +202,10 @@ router.get('/news', requireAuth, (req, res) => {
     where.push('(n.title LIKE @q OR n.excerpt LIKE @q)');
     params.q = `%${q}%`;
   }
+  if (!isOwner(req)) {
+    where.push('n.author_id = @currentAuthorId');
+    params.currentAuthorId = req.session.admin.id;
+  }
   params.limit = limit;
   params.offset = offset;
 
@@ -186,6 +213,7 @@ router.get('/news', requireAuth, (req, res) => {
     .prepare(
       `SELECT n.id, n.title, n.slug, n.status, n.is_breaking, n.views,
               n.published_at, n.created_at, n.updated_at, n.cover_image,
+              n.author_name, n.author_title, n.author_photo,
               c.name AS category_name, c.id AS category_id
        FROM news n LEFT JOIN categories c ON c.id = n.category_id
        WHERE ${where.join(' AND ')}
@@ -203,7 +231,7 @@ router.get('/news', requireAuth, (req, res) => {
   res.json({ news: rows, total, page, limit });
 });
 
-router.get('/news/:id', requireAuth, (req, res) => {
+router.get('/news/:id', requireAuth, requireNewsOwner, (req, res) => {
   const id = Number(req.params.id);
   const n = db
     .prepare(
@@ -227,6 +255,9 @@ router.post('/news', requireAuth, async (req, res) => {
     ? String(body.excerpt)
     : stripHtml(content).slice(0, 200);
   const coverImage = body.cover_image || null;
+  const authorName = String(body.author_name || req.session.admin.login || '').trim();
+  const authorTitle = String(body.author_title || '').trim();
+  const authorPhoto = body.author_photo || null;
   const categoryId = body.category_id ? Number(body.category_id) : null;
   const status = body.status === 'published' ? 'published' : 'draft';
   const isBreaking = body.is_breaking ? 1 : 0;
@@ -239,9 +270,10 @@ router.post('/news', requireAuth, async (req, res) => {
   const info = db
     .prepare(
       `INSERT INTO news
-       (title, slug, excerpt, content, cover_image, category_id, author_id,
+       (title, slug, excerpt, content, cover_image, author_name, author_title,
+        author_photo, category_id, author_id,
         status, is_breaking, published_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
     )
     .run(
       title,
@@ -249,6 +281,9 @@ router.post('/news', requireAuth, async (req, res) => {
       excerpt,
       content,
       coverImage,
+      authorName,
+      authorTitle,
+      authorPhoto,
       categoryId,
       req.session.admin.id,
       status,
@@ -267,7 +302,7 @@ router.post('/news', requireAuth, async (req, res) => {
   res.json({ ok: true, id: info.lastInsertRowid, autopost: autopostResult });
 });
 
-router.put('/news/:id', requireAuth, async (req, res) => {
+router.put('/news/:id', requireAuth, requireNewsOwner, async (req, res) => {
   const id = Number(req.params.id);
   const existing = db.prepare('SELECT * FROM news WHERE id = ?').get(id);
   if (!existing) return res.status(404).json({ error: 'Новость не найдена' });
@@ -288,6 +323,12 @@ router.put('/news/:id', requireAuth, async (req, res) => {
 
   const coverImage =
     body.cover_image !== undefined ? body.cover_image || null : existing.cover_image;
+  const authorName =
+    body.author_name !== undefined ? String(body.author_name || '').trim() : existing.author_name;
+  const authorTitle =
+    body.author_title !== undefined ? String(body.author_title || '').trim() : existing.author_title;
+  const authorPhoto =
+    body.author_photo !== undefined ? body.author_photo || null : existing.author_photo;
   const categoryId =
     body.category_id !== undefined
       ? body.category_id
@@ -307,6 +348,7 @@ router.put('/news/:id', requireAuth, async (req, res) => {
   db.prepare(
     `UPDATE news SET
        title = ?, slug = ?, excerpt = ?, content = ?, cover_image = ?,
+       author_name = ?, author_title = ?, author_photo = ?,
        category_id = ?, status = ?, is_breaking = ?, published_at = ?,
        updated_at = datetime('now')
      WHERE id = ?`
@@ -316,6 +358,9 @@ router.put('/news/:id', requireAuth, async (req, res) => {
     excerpt,
     content,
     coverImage,
+    authorName,
+    authorTitle,
+    authorPhoto,
     categoryId,
     status,
     isBreaking,
@@ -335,7 +380,7 @@ router.put('/news/:id', requireAuth, async (req, res) => {
   res.json({ ok: true, id, autopost: autopostResult });
 });
 
-router.delete('/news/:id', requireAuth, (req, res) => {
+router.delete('/news/:id', requireAuth, requireOwner, (req, res) => {
   const id = Number(req.params.id);
   db.prepare('DELETE FROM news WHERE id = ?').run(id);
   res.json({ ok: true });
@@ -365,11 +410,11 @@ router.get('/public/search', (req, res) => {
 // Settings
 // ─────────────────────────────────────────────
 
-router.get('/settings', requireAuth, (req, res) => {
+router.get('/settings', requireAuth, requireOwner, (req, res) => {
   res.json({ settings: getAllSettings() });
 });
 
-router.put('/settings', requireAuth, (req, res) => {
+router.put('/settings', requireAuth, requireOwner, (req, res) => {
   const updated = setSettings(req.body || {});
   res.json({ ok: true, settings: updated });
 });
@@ -390,7 +435,7 @@ router.post('/admins', requireAuth, requireOwner, (req, res) => {
   if (!login || !password) return res.status(400).json({ error: 'Логин и пароль обязательны' });
   const exists = db.prepare('SELECT id FROM admins WHERE login = ?').get(login);
   if (exists) return res.status(400).json({ error: 'Логин уже занят' });
-  const finalRole = role === 'owner' ? 'owner' : 'editor';
+  const finalRole = role === 'owner' ? 'owner' : 'author';
   const hash = bcrypt.hashSync(String(password), 10);
   const info = db
     .prepare('INSERT INTO admins (login, password_hash, role) VALUES (?, ?, ?)')
@@ -405,7 +450,7 @@ router.put('/admins/:id', requireAuth, requireOwner, (req, res) => {
 
   const { login, password, role } = req.body || {};
   const newLogin = login != null ? String(login).trim() : admin.login;
-  const newRole = role === 'owner' ? 'owner' : role === 'editor' ? 'editor' : admin.role;
+  const newRole = role === 'owner' ? 'owner' : role === 'author' || role === 'editor' ? 'author' : admin.role;
 
   // Защита: нельзя убрать последнего owner
   if (admin.role === 'owner' && newRole !== 'owner') {

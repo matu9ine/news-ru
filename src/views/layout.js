@@ -4,7 +4,7 @@ const { db } = require('../db');
 
 function renderHeader(settings, activeSlug) {
   const categories = db
-    .prepare('SELECT name, slug FROM categories ORDER BY sort_order ASC, id ASC')
+    .prepare("SELECT name, slug FROM categories WHERE slug IN ('mnenie', 'cifry-fakty') ORDER BY sort_order ASC, id ASC")
     .all();
 
   const logoText = escapeHtml(settings.logo_text || settings.site_name || 'Редакция');
@@ -45,7 +45,7 @@ function renderHeader(settings, activeSlug) {
 <div class="search-overlay" id="searchOverlay" hidden>
   <div class="search-overlay-inner">
     <form class="search-form" action="/search" method="GET" role="search">
-      <input type="search" name="q" id="searchInput" placeholder="Что ищем?" autocomplete="off" aria-label="Поиск по сайту">
+      <input type="search" name="q" id="searchInput" placeholder="Поиск по архиву" autocomplete="off" aria-label="Поиск по сайту">
       <button type="button" class="icon-btn" id="searchClose" aria-label="Закрыть поиск">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
       </button>
@@ -56,23 +56,7 @@ function renderHeader(settings, activeSlug) {
 }
 
 function renderBreakingBar() {
-  const breaking = db
-    .prepare(
-      "SELECT title, slug FROM news WHERE status = 'published' AND is_breaking = 1 ORDER BY published_at DESC LIMIT 10"
-    )
-    .all();
-  if (!breaking.length) return '';
-  const items = breaking
-    .map(
-      (n) =>
-        `<a class="breaking-item" href="/news/${escapeHtml(n.slug)}"><span class="breaking-tag">Срочно</span><span>${escapeHtml(n.title)}</span></a>`
-    )
-    .join('');
-  // Дублируем для бесшовной прокрутки
-  return `
-<div class="breaking-bar" role="region" aria-label="Срочные новости">
-  <div class="breaking-track">${items}${items}</div>
-</div>`;
+  return '';
 }
 
 function renderFooter(settings) {
@@ -88,7 +72,7 @@ function renderFooter(settings) {
     .join('');
 
   const categories = db
-    .prepare('SELECT name, slug FROM categories ORDER BY sort_order ASC, id ASC')
+    .prepare("SELECT name, slug FROM categories WHERE slug IN ('mnenie', 'cifry-fakty') ORDER BY sort_order ASC, id ASC")
     .all();
   const catLinks = categories
     .map((c) => `<a href="/category/${escapeHtml(c.slug)}">${escapeHtml(c.name)}</a>`)
@@ -167,9 +151,6 @@ ${ogImg ? `<meta property="og:image" content="${escapeHtml(ogImg)}">` : ''}
 <meta name="twitter:description" content="${escapeHtml(desc)}">
 ${ogImg ? `<meta name="twitter:image" content="${escapeHtml(ogImg)}">` : ''}
 
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@400;700;900&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css">
 ${extraHead}
 ${jsonLd ? `<script type="application/ld+json">${jsonLd}</script>` : ''}

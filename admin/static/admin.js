@@ -219,9 +219,9 @@
     const nav = el('nav', { class: 'nav' });
     const items = [
       { key: 'news', label: 'Новости', path: '/news', icon: iconDoc() },
-      { key: 'categories', label: 'Рубрики', path: '/categories', icon: iconFolder() },
+      { key: 'categories', label: 'Рубрики', path: '/categories', icon: iconFolder(), ownerOnly: true },
       { key: 'admins', label: 'Админы', path: '/admins', icon: iconUsers(), ownerOnly: true },
-      { key: 'settings', label: 'Настройки', path: '/settings', icon: iconGear() },
+      { key: 'settings', label: 'Настройки', path: '/settings', icon: iconGear(), ownerOnly: true },
     ];
     for (const it of items) {
       if (it.ownerOnly && state.me.role !== 'owner') continue;
@@ -238,7 +238,7 @@
     const footer = el('div', { class: 'sidebar-user' });
     footer.appendChild(el('div', {},
       el('div', { class: 'user-name' }, state.me.login),
-      el('div', { class: 'muted' }, state.me.role === 'owner' ? 'Владелец' : 'Редактор')
+      el('div', { class: 'muted' }, state.me.role === 'owner' ? 'Владелец' : 'Автор')
     ));
     footer.appendChild(el('button', {
       class: 'btn btn-ghost btn-sm',

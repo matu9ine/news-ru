@@ -11,6 +11,13 @@ const db = new Database(DB_FILE);
 
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+db.pragma('synchronous = NORMAL');
+db.pragma('temp_store = MEMORY');
+db.pragma('busy_timeout = 5000');
+
+function columnExists(table, column) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+}
 
 function migrate() {
   db.exec(`
@@ -37,6 +44,9 @@ function migrate() {
       excerpt TEXT,
       content TEXT,
       cover_image TEXT,
+      author_name TEXT,
+      author_title TEXT,
+      author_photo TEXT,
       category_id INTEGER,
       author_id INTEGER,
       status TEXT NOT NULL DEFAULT 'draft',
@@ -50,21 +60,32 @@ function migrate() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_news_status_pub ON news(status, published_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_news_category ON news(category_id);
+    CREATE INDEX IF NOT EXISTS idx_news_category_status_pub ON news(category_id, status, published_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_news_author_status_pub ON news(author_id, status, published_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_news_slug ON news(slug);
 
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT
     );
   `);
+
+  const columns = [
+    ['author_name', 'TEXT'],
+    ['author_title', 'TEXT'],
+    ['author_photo', 'TEXT'],
+  ];
+  for (const [name, type] of columns) {
+    if (!columnExists('news', name)) db.exec(`ALTER TABLE news ADD COLUMN ${name} ${type}`);
+  }
 }
 
 function seed() {
   // Дефолтные настройки
   const defaults = {
-    site_name: 'Цифровая редакция',
-    site_tagline: 'Холодная премиальная редакция',
-    logo_text: 'Цифровая редакция',
+    site_name: 'Каспийский курьер',
+    site_tagline: 'Деловая хроника региона',
+    logo_text: 'Каспийский курьер',
     logo_image: '',
     social_vk: '',
     social_tg: '',
@@ -80,19 +101,28 @@ function seed() {
     'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)'
   );
   for (const [k, v] of Object.entries(defaults)) insertSetting.run(k, v);
+  db.prepare("UPDATE settings SET value = ? WHERE key = 'site_name' AND value = 'Цифровая редакция'")
+    .run(defaults.site_name);
+  db.prepare("UPDATE settings SET value = ? WHERE key = 'site_tagline' AND value = 'Холодная премиальная редакция'")
+    .run(defaults.site_tagline);
+  db.prepare("UPDATE settings SET value = ? WHERE key = 'logo_text' AND value = 'Цифровая редакция'")
+    .run(defaults.logo_text);
 
-  // Дефолтные рубрики
+  const upsertCat = db.prepare(
+    'INSERT OR IGNORE INTO categories (name, slug, sort_order) VALUES (?, ?, ?)'
+  );
+  upsertCat.run('Мнение', 'mnenie', 10);
+  upsertCat.run('Цифры/факты', 'cifry-fakty', 20);
+
+  // Дефолтные рубрики для новой базы
   const catCount = db.prepare('SELECT COUNT(*) AS c FROM categories').get().c;
   if (catCount === 0) {
     const stmt = db.prepare(
       'INSERT INTO categories (name, slug, sort_order) VALUES (?, ?, ?)'
     );
     const defaultCats = [
-      ['Политика', 'politika', 1],
-      ['Общество', 'obshchestvo', 2],
-      ['Технологии', 'tehnologii', 3],
-      ['Экономика', 'ekonomika', 4],
-      ['Мир', 'mir', 5],
+      ['Мнение', 'mnenie', 10],
+      ['Цифры/факты', 'cifry-fakty', 20],
     ];
     for (const c of defaultCats) stmt.run(...c);
   }

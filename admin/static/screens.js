@@ -116,23 +116,24 @@
       statusTd.appendChild(el('span', {
         class: 'badge ' + (n.status === 'published' ? 'badge-published' : 'badge-draft')
       }, n.status === 'published' ? 'Опубликовано' : 'Черновик'));
-      if (n.is_breaking) statusTd.appendChild(el('span', { class: 'badge badge-breaking', style: 'margin-left: 6px;' }, 'Срочно'));
       tr.appendChild(statusTd);
       tr.appendChild(el('td', {}, String(n.views || 0)));
       tr.appendChild(el('td', {}, fmtDate(n.published_at || n.created_at)));
       const actions = el('div', { class: 'actions' });
       actions.appendChild(el('a', { class: 'btn btn-sm', href: `/admin/news/edit/${n.id}`, 'data-link': `/news/edit/${n.id}` }, 'Открыть'));
-      actions.appendChild(el('button', {
-        class: 'btn btn-sm btn-danger',
-        onclick: async () => {
-          if (!confirm(`Удалить новость «${n.title}»?`)) return;
-          try {
-            await api('DELETE', `/api/news/${n.id}`);
-            toast('Новость удалена');
-            reload();
-          } catch (e) { toast(e.message, 'err'); }
-        },
-      }, 'Удалить'));
+      if (state.me.role === 'owner') {
+        actions.appendChild(el('button', {
+          class: 'btn btn-sm btn-danger',
+          onclick: async () => {
+            if (!confirm(`Удалить новость «${n.title}»?`)) return;
+            try {
+              await api('DELETE', `/api/news/${n.id}`);
+              toast('Новость удалена');
+              reload();
+            } catch (e) { toast(e.message, 'err'); }
+          },
+        }, 'Удалить'));
+      }
       tr.appendChild(el('td', {}, actions));
       tbody.appendChild(tr);
     }
@@ -198,6 +199,13 @@
     const coverPicker = buildCoverPicker(news?.cover_image || '');
     side.appendChild(el('div', {}, el('h3', {}, 'Обложка'), coverPicker.node));
 
+    const authorNameInput = el('input', { type: 'text', placeholder: 'Имя автора', value: news?.author_name || state.me.login || '' });
+    const authorTitleInput = el('input', { type: 'text', placeholder: 'Должность / краткое описание', value: news?.author_title || '' });
+    const authorPhotoPicker = buildCoverPicker(news?.author_photo || '');
+    side.appendChild(el('div', { class: 'field' }, el('label', {}, 'Автор'), authorNameInput));
+    side.appendChild(el('div', { class: 'field' }, el('label', {}, 'Должность автора'), authorTitleInput));
+    side.appendChild(el('div', {}, el('h3', {}, 'Фото автора'), authorPhotoPicker.node));
+
     // Category
     const catSel = el('select', {}, ...categoryOptions(news?.category_id));
     side.appendChild(el('div', { class: 'field' }, el('label', {}, 'Рубрика'), catSel));
@@ -213,8 +221,6 @@
     // Breaking
     const breakingInput = el('input', { type: 'checkbox' });
     if (news?.is_breaking) breakingInput.checked = true;
-    const breakingLabel = el('label', { class: 'checkbox-row' }, breakingInput, el('span', {}, 'Срочная новость'));
-    side.appendChild(el('div', { class: 'field' }, breakingLabel));
 
     // Published at
     const pubDateInput = el('input', { type: 'datetime-local' });
@@ -255,6 +261,9 @@
         excerpt: excerptInput.value,
         content: editor.getHTML(),
         cover_image: coverPicker.getUrl() || null,
+        author_name: authorNameInput.value.trim(),
+        author_title: authorTitleInput.value.trim(),
+        author_photo: authorPhotoPicker.getUrl() || null,
         category_id: catSel.value || null,
         status: statusSel.value,
         is_breaking: breakingInput.checked,
@@ -396,6 +405,16 @@
     toolbar.appendChild(btn('1. Список', 'insertOrderedList'));
     toolbar.appendChild(el('span', { class: 'editor-sep' }));
 
+    const tableBtn = el('button', { class: 'editor-btn', type: 'button', title: 'Таблица' }, 'Таблица');
+    tableBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    tableBtn.addEventListener('click', () => {
+      document.execCommand('insertHTML', false,
+        '<table><thead><tr><th>Показатель</th><th>Значение</th></tr></thead><tbody><tr><td></td><td></td></tr><tr><td></td><td></td></tr></tbody></table><p><br></p>'
+      );
+      content.focus();
+    });
+    toolbar.appendChild(tableBtn);
+
     const linkBtn = el('button', { class: 'editor-btn', type: 'button', title: 'Ссылка' }, '🔗');
     linkBtn.addEventListener('mousedown', (e) => e.preventDefault());
     linkBtn.addEventListener('click', () => {
@@ -443,11 +462,13 @@
     clearBtn.addEventListener('click', () => document.execCommand('removeFormat'));
     toolbar.appendChild(clearBtn);
 
-    // paste as plain text
+    // Сохраняем табличную структуру при вставке из редакторов.
     content.addEventListener('paste', (e) => {
       e.preventDefault();
-      const text = (e.clipboardData || window.clipboardData).getData('text');
-      document.execCommand('insertText', false, text);
+      const clip = e.clipboardData || window.clipboardData;
+      const html = clip.getData('text/html');
+      const text = clip.getData('text');
+      document.execCommand(html ? 'insertHTML' : 'insertText', false, html || text);
     });
 
     wrap.appendChild(toolbar);
@@ -570,7 +591,7 @@
     const loginI = el('input', { type: 'text', placeholder: 'Логин' });
     const passI = el('input', { type: 'password', placeholder: 'Пароль' });
     const roleI = el('select', {},
-      el('option', { value: 'editor' }, 'Редактор'),
+      el('option', { value: 'author' }, 'Автор'),
       el('option', { value: 'owner' }, 'Владелец'),
     );
     const addBtn = el('button', { class: 'btn btn-primary' }, '+ Добавить');
@@ -602,7 +623,7 @@
           password: passI.value,
           role: roleI.value,
         });
-        loginI.value = ''; passI.value = ''; roleI.value = 'editor';
+        loginI.value = ''; passI.value = ''; roleI.value = 'author';
         toast('Админ создан');
         reload();
       } catch (e) { toast(e.message, 'err'); }
@@ -623,10 +644,10 @@
         const lI = el('input', { type: 'text', value: a.login, style: 'width:100%;' });
         const pI = el('input', { type: 'password', placeholder: '— не менять —', style: 'width:100%;' });
         const rI = el('select', {},
-          el('option', { value: 'editor' }, 'Редактор'),
+          el('option', { value: 'author' }, 'Автор'),
           el('option', { value: 'owner' }, 'Владелец'),
         );
-        rI.value = a.role;
+        rI.value = a.role === 'owner' ? 'owner' : 'author';
         const saveB = el('button', { class: 'btn btn-sm btn-primary' }, 'Сохранить');
         const delB = el('button', { class: 'btn btn-sm btn-danger' }, 'Удалить');
         if (a.id === state.me.id) delB.disabled = true;

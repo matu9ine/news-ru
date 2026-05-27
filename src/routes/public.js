@@ -1,25 +1,23 @@
 const express = require('express');
 const { db } = require('../db');
 const { renderLayout } = require('../views/layout');
-const {
-  escapeHtml,
-  stripHtml,
-  formatDateRu,
-  timeAgo,
-  readingTime,
-} = require('../utils');
+const { escapeHtml, stripHtml, formatDateRu, readingTime } = require('../utils');
 const { getAllSettings } = require('../settings');
 
 const router = express.Router();
 
-// ─────────────────────────────────────────────
-// Хелперы выборки
-// ─────────────────────────────────────────────
+function siteBase(req) {
+  return (process.env.SITE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+}
+
+function fullNewsUrl(req, slug) {
+  return `${siteBase(req)}/news/${slug}`;
+}
 
 function getPublishedNews(filters = {}) {
-  const { categoryId, limit = 20, offset = 0, excludeId } = filters;
+  const { categoryId, limit = 30, offset = 0, excludeId } = filters;
   const where = ["n.status = 'published'"];
-  const params = {};
+  const params = { limit, offset };
   if (categoryId != null) {
     where.push('n.category_id = @categoryId');
     params.categoryId = categoryId;
@@ -28,33 +26,14 @@ function getPublishedNews(filters = {}) {
     where.push('n.id != @excludeId');
     params.excludeId = excludeId;
   }
-  params.limit = limit;
-  params.offset = offset;
-  const sql = `
+  return db.prepare(`
     SELECT n.*, c.name AS category_name, c.slug AS category_slug
     FROM news n
     LEFT JOIN categories c ON c.id = n.category_id
     WHERE ${where.join(' AND ')}
-    ORDER BY n.published_at DESC
+    ORDER BY n.published_at DESC, n.id DESC
     LIMIT @limit OFFSET @offset
-  `;
-  return db.prepare(sql).all(params);
-}
-
-function getPopular(limit = 5) {
-  return db
-    .prepare(
-      `SELECT n.id, n.title, n.slug, n.views, c.slug AS category_slug, c.name AS category_name
-       FROM news n LEFT JOIN categories c ON c.id = n.category_id
-       WHERE n.status = 'published'
-       ORDER BY n.views DESC, n.published_at DESC
-       LIMIT ?`
-    )
-    .all(limit);
-}
-
-function getCategoryById(id) {
-  return db.prepare('SELECT * FROM categories WHERE id = ?').get(id);
+  `).all(params);
 }
 
 function getCategoryBySlug(slug) {
@@ -67,219 +46,136 @@ function getAllCategories() {
     .all();
 }
 
-// ─────────────────────────────────────────────
-// Компоненты карточек
-// ─────────────────────────────────────────────
+function newsCard(n, opts = {}) {
+  const date = formatDateRu(n.published_at || n.created_at, true);
+  const excerpt = n.excerpt ? stripHtml(n.excerpt).slice(0, 220) : '';
+  const isOpinion = opts.opinion || n.category_slug === 'mnenie';
+  const authorName = n.author_name || '';
+  const authorTitle = n.author_title || '';
+  const authorPhoto = n.author_photo || '';
 
-function newsCard(n, variant = 'default') {
-  const date = formatDateRu(n.published_at || n.created_at, false);
-  const cat = n.category_name
-    ? `<a class="card-category" href="/category/${escapeHtml(n.category_slug)}">${escapeHtml(n.category_name)}</a>`
+  const author = isOpinion && authorName
+    ? `<div class="card-author">
+        ${authorPhoto ? `<img src="${escapeHtml(authorPhoto)}" alt="${escapeHtml(authorName)}" loading="lazy">` : ''}
+        <div>
+          <div class="card-author-name">${escapeHtml(authorName)}</div>
+          ${authorTitle ? `<div class="card-author-title">${escapeHtml(authorTitle)}</div>` : ''}
+        </div>
+      </div>`
     : '';
-  const excerpt = n.excerpt ? stripHtml(n.excerpt).slice(0, 180) : '';
-  const img = n.cover_image
-    ? `<a class="card-media" href="/news/${escapeHtml(n.slug)}"><img src="${escapeHtml(n.cover_image)}" alt="${escapeHtml(n.title)}" loading="lazy"></a>`
-    : '';
-  const breaking = n.is_breaking
-    ? '<span class="tag tag-breaking">Важно</span>'
-    : '';
-
-  if (variant === 'compact') {
-    return `
-<article class="card card-compact">
-  <div class="card-body">
-    <div class="card-meta">${cat}<span class="dot">·</span><time>${escapeHtml(date)}</time></div>
-    <h3 class="card-title"><a href="/news/${escapeHtml(n.slug)}">${escapeHtml(n.title)}</a></h3>
-  </div>
-</article>`;
-  }
 
   return `
-<article class="card card-row">
-  ${img}
-  <div class="card-body">
-    <div class="card-meta">${cat}${breaking}<span class="dot">·</span><time>${escapeHtml(date)}</time></div>
-    <h3 class="card-title"><a href="/news/${escapeHtml(n.slug)}">${escapeHtml(n.title)}</a></h3>
-    ${excerpt ? `<p class="card-excerpt">${escapeHtml(excerpt)}</p>` : ''}
+<article class="news-row">
+  ${n.cover_image ? `<a class="news-row-media" href="/news/${escapeHtml(n.slug)}"><img src="${escapeHtml(n.cover_image)}" alt="${escapeHtml(n.title)}" loading="lazy"></a>` : ''}
+  <div class="news-row-body">
+    <div class="news-row-meta">
+      <time datetime="${escapeHtml(n.published_at || n.created_at || '')}">${escapeHtml(date)}</time>
+      ${n.category_name ? `<span class="meta-sep">/</span><a href="/category/${escapeHtml(n.category_slug)}">${escapeHtml(n.category_name)}</a>` : ''}
+    </div>
+    <h2 class="news-row-title"><a href="/news/${escapeHtml(n.slug)}">${escapeHtml(n.title)}</a></h2>
+    ${excerpt ? `<p class="news-row-excerpt">${escapeHtml(excerpt)}</p>` : ''}
+    ${author}
   </div>
 </article>`;
 }
 
-// ─────────────────────────────────────────────
-// Главная
-// ─────────────────────────────────────────────
+function searchArchiveBlock(q = '') {
+  return `
+<section class="archive-search" aria-label="Поиск по архиву">
+  <form action="/search" method="GET" role="search">
+    <label for="archive-q">Поиск по архиву</label>
+    <div class="archive-search-row">
+      <input id="archive-q" type="search" name="q" value="${escapeHtml(q)}" placeholder="Введите тему, фамилию или дату">
+      <button type="submit">Найти</button>
+    </div>
+  </form>
+</section>`;
+}
+
+function shareButtons(req, n) {
+  const url = fullNewsUrl(req, n.slug);
+  const encodedUrl = encodeURIComponent(url);
+  const encodedTitle = encodeURIComponent(n.title);
+  const links = [
+    ['VK', `https://vk.com/share.php?url=${encodedUrl}&title=${encodedTitle}`],
+    ['Telegram', `https://t.me/share/url?url=${encodedUrl}&text=${encodedTitle}`],
+    ['WhatsApp', `https://api.whatsapp.com/send?text=${encodedTitle}%20${encodedUrl}`],
+    ['OK', `https://connect.ok.ru/offer?url=${encodedUrl}&title=${encodedTitle}`],
+  ];
+  return `
+<section class="share-block" aria-label="Поделиться новостью">
+  <div class="share-title">Поделиться</div>
+  <div class="share-links">
+    ${links.map(([label, href]) => `<a class="share-link" href="${href}" target="_blank" rel="noopener">${label}</a>`).join('')}
+  </div>
+</section>`;
+}
 
 router.get('/', (req, res) => {
-  const all = getPublishedNews({ limit: 30 });
-  const hero = all[0];
-  const secondary = all.slice(1, 4);
-  const feed = all.slice(4);
-  const popular = getPopular(5);
-  const categories = getAllCategories();
-
-  // Блок «Карточки рубрик» — по 3 новости на рубрику
-  const categoryBlocks = categories
-    .map((cat) => {
-      const items = getPublishedNews({ categoryId: cat.id, limit: 3 });
-      if (!items.length) return '';
-      const cards = items.map((n) => newsCard(n, 'compact')).join('');
-      return `
-<section class="cat-block">
-  <div class="cat-block-head">
-    <h2 class="section-title"><a href="/category/${escapeHtml(cat.slug)}">${escapeHtml(cat.name)}</a></h2>
-    <a class="section-more" href="/category/${escapeHtml(cat.slug)}">Все материалы →</a>
-  </div>
-  <div class="cat-block-items">${cards}</div>
-</section>`;
-    })
-    .join('');
-
-  const heroBlock = hero
-    ? `
-<section class="hero">
-  <article class="hero-main">
-    ${hero.cover_image
-        ? `<a class="hero-media" href="/news/${escapeHtml(hero.slug)}"><img src="${escapeHtml(hero.cover_image)}" alt="${escapeHtml(hero.title)}"></a>`
-        : ''}
-    <div class="hero-body">
-      <div class="hero-meta">
-        ${hero.category_name ? `<a class="hero-category" href="/category/${escapeHtml(hero.category_slug)}">${escapeHtml(hero.category_name)}</a>` : ''}
-        ${hero.is_breaking ? '<span class="tag tag-breaking">Важно</span>' : ''}
-      </div>
-      <h1 class="hero-title"><a href="/news/${escapeHtml(hero.slug)}">${escapeHtml(hero.title)}</a></h1>
-      ${hero.excerpt ? `<p class="hero-lead">${escapeHtml(stripHtml(hero.excerpt).slice(0, 240))}</p>` : ''}
-      <div class="hero-footer">
-        <time>${escapeHtml(formatDateRu(hero.published_at || hero.created_at, false))}</time>
-      </div>
-    </div>
-  </article>
-  <div class="hero-side">
-    ${secondary.map((n) => newsCard(n, 'compact')).join('')}
-  </div>
-</section>`
-    : '<section class="empty"><p>Новостей пока нет. Опубликуйте первые материалы в админке.</p></section>';
-
-  const feedBlock = feed.length
-    ? `
-<section class="feed-section">
-  <h2 class="section-title">Лента</h2>
-  <div class="feed">${feed.map((n) => newsCard(n)).join('')}</div>
-</section>`
-    : '';
-
-  const sidebar = `
-<aside class="sidebar">
-  <section class="side-block">
-    <h3 class="side-title">Популярное</h3>
-    <ol class="popular-list">
-      ${popular
-        .map(
-          (n, i) => `
-<li>
-  <span class="popular-num">${i + 1}</span>
-  <a href="/news/${escapeHtml(n.slug)}">${escapeHtml(n.title)}</a>
-</li>`
-        )
-        .join('')}
-    </ol>
-  </section>
-</aside>`;
-
+  const items = getPublishedNews({ limit: 50 });
   const content = `
 <div class="container-wide">
-  ${heroBlock}
-  <div class="layout-2col">
-    <div>
-      ${feedBlock}
-      ${categoryBlocks}
-    </div>
-    ${sidebar}
-  </div>
+  <header class="front-head">
+    <h1>Лента новостей</h1>
+  </header>
+  ${searchArchiveBlock()}
+  <section class="chronology">
+    ${items.length ? items.map((n) => newsCard(n)).join('') : '<div class="empty"><p>Новостей пока нет.</p></div>'}
+  </section>
 </div>`;
 
-  res.send(
-    renderLayout({
-      title: '',
-      description: 'Актуальные новости дня: политика, общество, технологии, экономика, мир.',
-      canonical: '/',
-      content,
-    })
-  );
+  res.send(renderLayout({
+    title: '',
+    description: 'Хронологическая лента новостей.',
+    canonical: '/',
+    content,
+  }));
 });
-
-// ─────────────────────────────────────────────
-// Страница рубрики
-// ─────────────────────────────────────────────
 
 router.get('/category/:slug', (req, res) => {
   const cat = getCategoryBySlug(req.params.slug);
   if (!cat) return res.status(404).send(renderNotFound());
 
   const items = getPublishedNews({ categoryId: cat.id, limit: 50 });
-  const popular = getPopular(5);
-
+  const isOpinion = cat.slug === 'mnenie';
   const content = `
 <div class="container-wide">
   <header class="page-head">
-    <div class="breadcrumbs"><a href="/">Главная</a><span>→</span><span>${escapeHtml(cat.name)}</span></div>
+    <div class="breadcrumbs"><a href="/">Главная</a><span>/</span><span>${escapeHtml(cat.name)}</span></div>
     <h1 class="page-title">${escapeHtml(cat.name)}</h1>
   </header>
-  <div class="layout-2col">
-    <div>
-      ${items.length
-          ? `<div class="feed">${items.map((n) => newsCard(n)).join('')}</div>`
-          : '<div class="empty"><p>В этой рубрике ещё нет опубликованных материалов.</p></div>'}
-    </div>
-    <aside class="sidebar">
-      <section class="side-block">
-        <h3 class="side-title">Популярное</h3>
-        <ol class="popular-list">
-          ${popular.map((n, i) => `<li><span class="popular-num">${i + 1}</span><a href="/news/${escapeHtml(n.slug)}">${escapeHtml(n.title)}</a></li>`).join('')}
-        </ol>
-      </section>
-    </aside>
-  </div>
+  ${searchArchiveBlock()}
+  <section class="chronology">
+    ${items.length ? items.map((n) => newsCard(n, { opinion: isOpinion })).join('') : '<div class="empty"><p>В этой рубрике пока нет публикаций.</p></div>'}
+  </section>
 </div>`;
 
-  res.send(
-    renderLayout({
-      title: cat.name,
-      description: `Все новости рубрики «${cat.name}»`,
-      canonical: `/category/${cat.slug}`,
-      activeSlug: cat.slug,
-      content,
-    })
-  );
+  res.send(renderLayout({
+    title: cat.name,
+    description: `Публикации рубрики ${cat.name}`,
+    canonical: `/category/${cat.slug}`,
+    activeSlug: cat.slug,
+    content,
+  }));
 });
 
-// ─────────────────────────────────────────────
-// Страница новости
-// ─────────────────────────────────────────────
-
 router.get('/news/:slug', (req, res) => {
-  const n = db
-    .prepare(
-      `SELECT n.*, c.name AS category_name, c.slug AS category_slug
-       FROM news n LEFT JOIN categories c ON c.id = n.category_id
-       WHERE n.slug = ? AND n.status = 'published'`
-    )
-    .get(req.params.slug);
+  const n = db.prepare(`
+    SELECT n.*, c.name AS category_name, c.slug AS category_slug
+    FROM news n
+    LEFT JOIN categories c ON c.id = n.category_id
+    WHERE n.slug = ? AND n.status = 'published'
+  `).get(req.params.slug);
   if (!n) return res.status(404).send(renderNotFound());
 
-  // Счётчик просмотров
   db.prepare('UPDATE news SET views = views + 1 WHERE id = ?').run(n.id);
 
-  const related = getPublishedNews({
-    categoryId: n.category_id,
-    limit: 3,
-    excludeId: n.id,
-  });
-
   const settings = getAllSettings();
-  const siteUrl = process.env.SITE_URL || '';
   const canonical = `/news/${n.slug}`;
-  const fullUrl = `${siteUrl}${canonical}`;
+  const fullUrl = fullNewsUrl(req, n.slug);
   const minutes = readingTime(n.content || n.excerpt || '');
+  const authorName = n.author_name || 'Редакция';
+  const authorTitle = n.author_title || '';
 
   const jsonLd = JSON.stringify({
     '@context': 'https://schema.org',
@@ -287,6 +183,7 @@ router.get('/news/:slug', (req, res) => {
     headline: n.title,
     description: n.excerpt || stripHtml(n.content || '').slice(0, 200),
     image: n.cover_image || undefined,
+    author: { '@type': 'Person', name: authorName },
     datePublished: n.published_at || n.created_at,
     dateModified: n.updated_at || n.published_at || n.created_at,
     mainEntityOfPage: fullUrl,
@@ -301,167 +198,120 @@ router.get('/news/:slug', (req, res) => {
   <header class="article-head">
     <div class="breadcrumbs">
       <a href="/">Главная</a>
-      <span>→</span>
-      ${n.category_name ? `<a href="/category/${escapeHtml(n.category_slug)}">${escapeHtml(n.category_name)}</a>` : ''}
+      ${n.category_name ? `<span>/</span><a href="/category/${escapeHtml(n.category_slug)}">${escapeHtml(n.category_name)}</a>` : ''}
     </div>
-    ${n.category_name ? `<div class="article-category">${escapeHtml(n.category_name)}</div>` : ''}
     <h1 class="article-title">${escapeHtml(n.title)}</h1>
     ${n.excerpt ? `<p class="article-lead">${escapeHtml(stripHtml(n.excerpt))}</p>` : ''}
     <div class="article-meta">
-      <time>${escapeHtml(formatDateRu(n.published_at || n.created_at, true))}</time>
-      <span class="dot">·</span>
-      <span>~${minutes} мин чтения</span>
-      ${n.is_breaking ? '<span class="tag tag-breaking">Важно</span>' : ''}
+      <time datetime="${escapeHtml(n.published_at || n.created_at || '')}">${escapeHtml(formatDateRu(n.published_at || n.created_at, true))}</time>
+      <span>${minutes} мин чтения</span>
+    </div>
+    <div class="article-author">
+      ${n.author_photo ? `<img src="${escapeHtml(n.author_photo)}" alt="${escapeHtml(authorName)}">` : ''}
+      <div>
+        <div class="article-author-name">Автор: ${escapeHtml(authorName)}</div>
+        ${authorTitle ? `<div class="article-author-title">${escapeHtml(authorTitle)}</div>` : ''}
+      </div>
     </div>
   </header>
-  ${n.cover_image
-      ? `<figure class="article-cover"><img src="${escapeHtml(n.cover_image)}" alt="${escapeHtml(n.title)}"></figure>`
-      : ''}
+  ${n.cover_image ? `<figure class="article-cover"><img src="${escapeHtml(n.cover_image)}" alt="${escapeHtml(n.title)}"></figure>` : ''}
   <div class="article-body">${n.content || ''}</div>
-  <div class="article-actions">
-    <a class="btn-back" href="${n.category_slug ? `/category/${escapeHtml(n.category_slug)}` : '/'}">← Назад</a>
-  </div>
-</article>
+  ${shareButtons(req, n)}
+</article>`;
 
-${related.length ? `
-<section class="container-wide related-section">
-  <h2 class="section-title">Читайте также</h2>
-  <div class="related-grid">
-    ${related.map((r) => newsCard(r, 'compact')).join('')}
-  </div>
-</section>` : ''}
-`;
-
-  res.send(
-    renderLayout({
-      title: n.title,
-      description: n.excerpt || stripHtml(n.content || '').slice(0, 160),
-      canonical,
-      ogImage: n.cover_image,
-      ogType: 'article',
-      jsonLd,
-      activeSlug: n.category_slug || '',
-      content,
-    })
-  );
+  res.send(renderLayout({
+    title: n.title,
+    description: n.excerpt || stripHtml(n.content || '').slice(0, 160),
+    canonical,
+    ogImage: n.cover_image,
+    ogType: 'article',
+    jsonLd,
+    activeSlug: n.category_slug || '',
+    content,
+  }));
 });
-
-// ─────────────────────────────────────────────
-// Поиск
-// ─────────────────────────────────────────────
 
 router.get('/search', (req, res) => {
   const q = String(req.query.q || '').trim();
   let results = [];
   if (q) {
     const like = `%${q}%`;
-    results = db
-      .prepare(
-        `SELECT n.*, c.name AS category_name, c.slug AS category_slug
-         FROM news n LEFT JOIN categories c ON c.id = n.category_id
-         WHERE n.status = 'published' AND (n.title LIKE ? OR n.excerpt LIKE ? OR n.content LIKE ?)
-         ORDER BY n.published_at DESC
-         LIMIT 50`
-      )
-      .all(like, like, like);
+    results = db.prepare(`
+      SELECT n.*, c.name AS category_name, c.slug AS category_slug
+      FROM news n
+      LEFT JOIN categories c ON c.id = n.category_id
+      WHERE n.status = 'published'
+        AND (n.title LIKE ? OR n.excerpt LIKE ? OR n.content LIKE ? OR n.author_name LIKE ?)
+      ORDER BY n.published_at DESC, n.id DESC
+      LIMIT 50
+    `).all(like, like, like, like);
   }
 
   const content = `
 <div class="container-wide">
   <header class="page-head">
     <h1 class="page-title">Поиск</h1>
-    <form class="page-search" action="/search" method="GET">
-      <input type="search" name="q" value="${escapeHtml(q)}" placeholder="Ваш запрос" autofocus>
-      <button type="submit" class="btn-primary">Найти</button>
-    </form>
-    ${q ? `<p class="muted">По запросу «${escapeHtml(q)}» ${results.length ? 'найдено материалов: ' + results.length : 'ничего не найдено'}</p>` : ''}
   </header>
-  <div class="feed">
+  ${searchArchiveBlock(q)}
+  ${q ? `<p class="search-note">По запросу «${escapeHtml(q)}» найдено: ${results.length}</p>` : ''}
+  <section class="chronology">
     ${results.map((n) => newsCard(n)).join('')}
-  </div>
+  </section>
 </div>`;
 
-  res.send(
-    renderLayout({
-      title: q ? `Поиск: ${q}` : 'Поиск',
-      description: 'Поиск по новостям редакции',
-      canonical: '/search',
-      content,
-    })
-  );
+  res.send(renderLayout({
+    title: q ? `Поиск: ${q}` : 'Поиск',
+    description: 'Поиск по архиву новостей.',
+    canonical: '/search',
+    content,
+  }));
 });
-
-// ─────────────────────────────────────────────
-// robots.txt
-// ─────────────────────────────────────────────
 
 router.get('/robots.txt', (req, res) => {
-  const siteUrl = process.env.SITE_URL || '';
-  res.type('text/plain').send(
-    [
-      'User-agent: *',
-      'Allow: /',
-      'Disallow: /admin',
-      'Disallow: /api',
-      `Sitemap: ${siteUrl.replace(/\/+$/, '')}/sitemap.xml`,
-      '',
-    ].join('\n')
-  );
+  const base = siteBase(req);
+  res.type('text/plain').send([
+    'User-agent: *',
+    'Allow: /',
+    'Disallow: /admin',
+    'Disallow: /api',
+    `Sitemap: ${base}/sitemap.xml`,
+    '',
+  ].join('\n'));
 });
 
-// ─────────────────────────────────────────────
-// sitemap.xml
-// ─────────────────────────────────────────────
-
 router.get('/sitemap.xml', (req, res) => {
-  const siteUrl = (process.env.SITE_URL || '').replace(/\/+$/, '');
+  const base = siteBase(req);
   const cats = getAllCategories();
-  const news = db
-    .prepare(
-      "SELECT slug, updated_at, published_at FROM news WHERE status = 'published' ORDER BY published_at DESC"
-    )
-    .all();
+  const news = db.prepare(
+    "SELECT slug, updated_at, published_at FROM news WHERE status = 'published' ORDER BY published_at DESC"
+  ).all();
 
-  const urls = [];
-  urls.push({ loc: `${siteUrl}/`, changefreq: 'hourly', priority: '1.0' });
-  for (const c of cats) {
-    urls.push({
-      loc: `${siteUrl}/category/${c.slug}`,
-      changefreq: 'hourly',
-      priority: '0.8',
-    });
-  }
-  for (const n of news) {
-    urls.push({
-      loc: `${siteUrl}/news/${n.slug}`,
+  const urls = [
+    { loc: `${base}/`, changefreq: 'hourly', priority: '1.0' },
+    ...cats.map((c) => ({ loc: `${base}/category/${c.slug}`, changefreq: 'daily', priority: '0.7' })),
+    ...news.map((n) => ({
+      loc: `${base}/news/${n.slug}`,
       lastmod: (n.updated_at || n.published_at || '').split(' ')[0] || undefined,
       changefreq: 'daily',
-      priority: '0.7',
-    });
-  }
+      priority: '0.8',
+    })),
+  ];
 
   const xml =
-    `<?xml version="1.0" encoding="UTF-8"?>\n` +
-    `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
-    urls
-      .map(
-        (u) =>
-          `  <url>\n` +
-          `    <loc>${escapeHtml(u.loc)}</loc>\n` +
-          (u.lastmod ? `    <lastmod>${escapeHtml(u.lastmod)}</lastmod>\n` : '') +
-          `    <changefreq>${u.changefreq}</changefreq>\n` +
-          `    <priority>${u.priority}</priority>\n` +
-          `  </url>`
-      )
-      .join('\n') +
-    `\n</urlset>\n`;
+    '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
+    urls.map((u) =>
+      `  <url>\n` +
+      `    <loc>${escapeHtml(u.loc)}</loc>\n` +
+      (u.lastmod ? `    <lastmod>${escapeHtml(u.lastmod)}</lastmod>\n` : '') +
+      `    <changefreq>${u.changefreq}</changefreq>\n` +
+      `    <priority>${u.priority}</priority>\n` +
+      `  </url>`
+    ).join('\n') +
+    '\n</urlset>\n';
 
   res.type('application/xml').send(xml);
 });
-
-// ─────────────────────────────────────────────
-// 404
-// ─────────────────────────────────────────────
 
 function renderNotFound() {
   return renderLayout({
