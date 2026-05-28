@@ -5,6 +5,7 @@ const express = require('express');
 const session = require('express-session');
 
 const { init: initDb } = require('./src/db');
+const { SQLiteSessionStore } = require('./src/session-store');
 
 initDb();
 
@@ -20,12 +21,13 @@ app.use(
   session({
     name: 'editorial.sid',
     secret: process.env.SESSION_SECRET || 'dev-secret',
+    store: new SQLiteSessionStore(),
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
       sameSite: 'lax',
-      secure: false,
+      secure: process.env.NODE_ENV === 'production',
       maxAge: 7 * 24 * 60 * 60 * 1000,
     },
   })

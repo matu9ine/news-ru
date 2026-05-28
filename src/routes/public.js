@@ -3,8 +3,10 @@ const { db } = require('../db');
 const { renderLayout } = require('../views/layout');
 const { escapeHtml, stripHtml, formatDateRu, readingTime } = require('../utils');
 const { getAllSettings } = require('../settings');
+const { getPublicCache, setPublicCache } = require('../cache');
 
 const router = express.Router();
+const PAGE_SIZE = 12;
 
 function siteBase(req) {
   return (process.env.SITE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
@@ -34,6 +36,99 @@ function getPublishedNews(filters = {}) {
     ORDER BY n.published_at DESC, n.id DESC
     LIMIT @limit OFFSET @offset
   `).all(params);
+}
+
+function countPublishedNews(filters = {}) {
+  const { categoryId } = filters;
+  const where = ["n.status = 'published'"];
+  const params = {};
+  if (categoryId != null) {
+    where.push('n.category_id = @categoryId');
+    params.categoryId = categoryId;
+  }
+  return db.prepare(`
+    SELECT COUNT(*) AS c
+    FROM news n
+    WHERE ${where.join(' AND ')}
+  `).get(params).c;
+}
+
+function pageFromReq(req) {
+  return Math.max(1, Number(req.query.page) || 1);
+}
+
+function renderPagination(req, total, page, limit) {
+  const pages = Math.max(1, Math.ceil(total / limit));
+  if (pages <= 1) return '';
+  const makeUrl = (p) => {
+    const params = new URLSearchParams(req.query);
+    if (p <= 1) params.delete('page');
+    else params.set('page', String(p));
+    const qs = params.toString();
+    return `${req.path}${qs ? `?${qs}` : ''}`;
+  };
+  return `
+<nav class="pagination" aria-label="Постраничная навигация">
+  ${page > 1 ? `<a href="${escapeHtml(makeUrl(page - 1))}">Назад</a>` : '<span>Назад</span>'}
+  <strong>${page} / ${pages}</strong>
+  ${page < pages ? `<a href="${escapeHtml(makeUrl(page + 1))}">Дальше</a>` : '<span>Дальше</span>'}
+</nav>`;
+}
+
+function sendCached(req, res, html, ttlMs = 30000) {
+  setPublicCache(req, html, ttlMs);
+  res.send(html);
+}
+
+function escapeFtsQuery(q) {
+  return String(q || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => `"${part.replace(/"/g, '""')}"`)
+    .join(' ');
+}
+
+function searchNews(q, limit, offset) {
+  const ftsQuery = escapeFtsQuery(q);
+  if (!ftsQuery) return { rows: [], total: 0 };
+  try {
+    const params = { ftsQuery, limit, offset };
+    const rows = db.prepare(`
+      SELECT n.*, c.name AS category_name, c.slug AS category_slug
+      FROM news_fts f
+      JOIN news n ON n.id = f.rowid
+      LEFT JOIN categories c ON c.id = n.category_id
+      WHERE news_fts MATCH @ftsQuery AND n.status = 'published'
+      ORDER BY bm25(news_fts), n.published_at DESC
+      LIMIT @limit OFFSET @offset
+    `).all(params);
+    const total = db.prepare(`
+      SELECT COUNT(*) AS c
+      FROM news_fts f
+      JOIN news n ON n.id = f.rowid
+      WHERE news_fts MATCH @ftsQuery AND n.status = 'published'
+    `).get(params).c;
+    return { rows, total };
+  } catch (_) {
+    const like = `%${q}%`;
+    const rows = db.prepare(`
+      SELECT n.*, c.name AS category_name, c.slug AS category_slug
+      FROM news n
+      LEFT JOIN categories c ON c.id = n.category_id
+      WHERE n.status = 'published'
+        AND (n.title LIKE ? OR n.excerpt LIKE ? OR n.content LIKE ? OR n.author_name LIKE ?)
+      ORDER BY n.published_at DESC, n.id DESC
+      LIMIT ? OFFSET ?
+    `).all(like, like, like, like, limit, offset);
+    const total = db.prepare(`
+      SELECT COUNT(*) AS c
+      FROM news n
+      WHERE n.status = 'published'
+        AND (n.title LIKE ? OR n.excerpt LIKE ? OR n.content LIKE ? OR n.author_name LIKE ?)
+    `).get(like, like, like, like).c;
+    return { rows, total };
+  }
 }
 
 function getCategoryBySlug(slug) {
@@ -112,7 +207,12 @@ function shareButtons(req, n) {
 }
 
 router.get('/', (req, res) => {
-  const items = getPublishedNews({ limit: 50 });
+  const cached = getPublicCache(req);
+  if (cached) return res.send(cached);
+  const page = pageFromReq(req);
+  const offset = (page - 1) * PAGE_SIZE;
+  const items = getPublishedNews({ limit: PAGE_SIZE, offset });
+  const total = countPublishedNews();
   const content = `
 <div class="container-wide">
   <header class="front-head">
@@ -122,9 +222,10 @@ router.get('/', (req, res) => {
   <section class="chronology">
     ${items.length ? items.map((n) => newsCard(n)).join('') : '<div class="empty"><p>Новостей пока нет.</p></div>'}
   </section>
+  ${renderPagination(req, total, page, PAGE_SIZE)}
 </div>`;
 
-  res.send(renderLayout({
+  sendCached(req, res, renderLayout({
     title: '',
     description: 'Хронологическая лента новостей.',
     canonical: '/',
@@ -133,10 +234,15 @@ router.get('/', (req, res) => {
 });
 
 router.get('/category/:slug', (req, res) => {
+  const cached = getPublicCache(req);
+  if (cached) return res.send(cached);
   const cat = getCategoryBySlug(req.params.slug);
   if (!cat) return res.status(404).send(renderNotFound());
 
-  const items = getPublishedNews({ categoryId: cat.id, limit: 50 });
+  const page = pageFromReq(req);
+  const offset = (page - 1) * PAGE_SIZE;
+  const items = getPublishedNews({ categoryId: cat.id, limit: PAGE_SIZE, offset });
+  const total = countPublishedNews({ categoryId: cat.id });
   const isOpinion = cat.slug === 'mnenie';
   const content = `
 <div class="container-wide">
@@ -148,9 +254,10 @@ router.get('/category/:slug', (req, res) => {
   <section class="chronology">
     ${items.length ? items.map((n) => newsCard(n, { opinion: isOpinion })).join('') : '<div class="empty"><p>В этой рубрике пока нет публикаций.</p></div>'}
   </section>
+  ${renderPagination(req, total, page, PAGE_SIZE)}
 </div>`;
 
-  res.send(renderLayout({
+  sendCached(req, res, renderLayout({
     title: cat.name,
     description: `Публикации рубрики ${cat.name}`,
     canonical: `/category/${cat.slug}`,
@@ -232,19 +339,17 @@ router.get('/news/:slug', (req, res) => {
 });
 
 router.get('/search', (req, res) => {
+  const cached = getPublicCache(req);
+  if (cached) return res.send(cached);
   const q = String(req.query.q || '').trim();
+  const page = pageFromReq(req);
+  const offset = (page - 1) * PAGE_SIZE;
   let results = [];
+  let total = 0;
   if (q) {
-    const like = `%${q}%`;
-    results = db.prepare(`
-      SELECT n.*, c.name AS category_name, c.slug AS category_slug
-      FROM news n
-      LEFT JOIN categories c ON c.id = n.category_id
-      WHERE n.status = 'published'
-        AND (n.title LIKE ? OR n.excerpt LIKE ? OR n.content LIKE ? OR n.author_name LIKE ?)
-      ORDER BY n.published_at DESC, n.id DESC
-      LIMIT 50
-    `).all(like, like, like, like);
+    const found = searchNews(q, PAGE_SIZE, offset);
+    results = found.rows;
+    total = found.total;
   }
 
   const content = `
@@ -253,13 +358,14 @@ router.get('/search', (req, res) => {
     <h1 class="page-title">Поиск</h1>
   </header>
   ${searchArchiveBlock(q)}
-  ${q ? `<p class="search-note">По запросу «${escapeHtml(q)}» найдено: ${results.length}</p>` : ''}
+  ${q ? `<p class="search-note">По запросу «${escapeHtml(q)}» найдено: ${total}</p>` : ''}
   <section class="chronology">
     ${results.map((n) => newsCard(n)).join('')}
   </section>
+  ${q ? renderPagination(req, total, page, PAGE_SIZE) : ''}
 </div>`;
 
-  res.send(renderLayout({
+  sendCached(req, res, renderLayout({
     title: q ? `Поиск: ${q}` : 'Поиск',
     description: 'Поиск по архиву новостей.',
     canonical: '/search',
@@ -280,6 +386,8 @@ router.get('/robots.txt', (req, res) => {
 });
 
 router.get('/sitemap.xml', (req, res) => {
+  const cached = getPublicCache(req);
+  if (cached) return res.type('application/xml').send(cached);
   const base = siteBase(req);
   const cats = getAllCategories();
   const news = db.prepare(
@@ -310,6 +418,7 @@ router.get('/sitemap.xml', (req, res) => {
     ).join('\n') +
     '\n</urlset>\n';
 
+  setPublicCache(req, xml, 10 * 60 * 1000);
   res.type('application/xml').send(xml);
 });
 

@@ -6,7 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "backup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup.ps1"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

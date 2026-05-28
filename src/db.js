@@ -78,6 +78,39 @@ function migrate() {
   for (const [name, type] of columns) {
     if (!columnExists('news', name)) db.exec(`ALTER TABLE news ADD COLUMN ${name} ${type}`);
   }
+
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS news_fts USING fts5(
+        title,
+        excerpt,
+        content,
+        author_name,
+        content='news',
+        content_rowid='id'
+      );
+
+      CREATE TRIGGER IF NOT EXISTS news_ai AFTER INSERT ON news BEGIN
+        INSERT INTO news_fts(rowid, title, excerpt, content, author_name)
+        VALUES (new.id, new.title, new.excerpt, new.content, new.author_name);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS news_ad AFTER DELETE ON news BEGIN
+        INSERT INTO news_fts(news_fts, rowid, title, excerpt, content, author_name)
+        VALUES('delete', old.id, old.title, old.excerpt, old.content, old.author_name);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS news_au AFTER UPDATE ON news BEGIN
+        INSERT INTO news_fts(news_fts, rowid, title, excerpt, content, author_name)
+        VALUES('delete', old.id, old.title, old.excerpt, old.content, old.author_name);
+        INSERT INTO news_fts(rowid, title, excerpt, content, author_name)
+        VALUES (new.id, new.title, new.excerpt, new.content, new.author_name);
+      END;
+    `);
+    db.exec("INSERT INTO news_fts(news_fts) VALUES('rebuild')");
+  } catch (err) {
+    console.warn('[db] FTS5 недоступен, поиск будет работать через LIKE:', err.message);
+  }
 }
 
 function seed() {

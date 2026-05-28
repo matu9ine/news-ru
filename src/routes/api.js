@@ -8,8 +8,18 @@ const { db } = require('../db');
 const { makeSlug, stripHtml } = require('../utils');
 const { getAllSettings, setSettings } = require('../settings');
 const { autopost } = require('../autopost');
+const { clearPublicCache } = require('../cache');
+const {
+  rateLimitLogin,
+  clearLoginAttempts,
+  ensureCsrfToken,
+  requireCsrf,
+  sanitizeHtml,
+} = require('../security');
 
 const router = express.Router();
+
+router.use(requireCsrf);
 
 // ─────────────────────────────────────────────
 // Middleware
@@ -86,7 +96,7 @@ router.post('/upload', requireAuth, (req, res) => {
 // Auth
 // ─────────────────────────────────────────────
 
-router.post('/auth/login', (req, res) => {
+router.post('/auth/login', rateLimitLogin, (req, res) => {
   const { login, password } = req.body || {};
   if (!login || !password) return res.status(400).json({ error: 'Логин и пароль обязательны' });
   const admin = db.prepare('SELECT * FROM admins WHERE login = ?').get(login);
@@ -94,9 +104,11 @@ router.post('/auth/login', (req, res) => {
   if (!bcrypt.compareSync(password, admin.password_hash))
     return res.status(401).json({ error: 'Неверный логин или пароль' });
   req.session.admin = { id: admin.id, login: admin.login, role: admin.role };
+  clearLoginAttempts(req);
   res.json({
     ok: true,
     admin: { id: admin.id, login: admin.login, role: admin.role },
+    csrfToken: ensureCsrfToken(req),
   });
 });
 
@@ -105,7 +117,10 @@ router.post('/auth/logout', (req, res) => {
 });
 
 router.get('/auth/me', (req, res) => {
-  res.json({ admin: (req.session && req.session.admin) || null });
+  res.json({
+    admin: (req.session && req.session.admin) || null,
+    csrfToken: req.session && req.session.admin ? ensureCsrfToken(req) : null,
+  });
 });
 
 // ─────────────────────────────────────────────
@@ -126,6 +141,7 @@ router.post('/categories', requireAuth, requireOwner, (req, res) => {
   const info = db
     .prepare('INSERT INTO categories (name, slug, sort_order) VALUES (?, ?, ?)')
     .run(String(name).trim(), finalSlug, Number(sort_order) || 0);
+  clearPublicCache();
   res.json({ ok: true, id: info.lastInsertRowid });
 });
 
@@ -142,6 +158,7 @@ router.put('/categories/:id', requireAuth, requireOwner, (req, res) => {
   db.prepare(
     'UPDATE categories SET name = ?, slug = ?, sort_order = ? WHERE id = ?'
   ).run(newName, newSlug, newOrder, id);
+  clearPublicCache();
   res.json({ ok: true });
 });
 
@@ -149,6 +166,7 @@ router.delete('/categories/:id', requireAuth, requireOwner, (req, res) => {
   const id = Number(req.params.id);
   db.prepare('UPDATE news SET category_id = NULL WHERE category_id = ?').run(id);
   db.prepare('DELETE FROM categories WHERE id = ?').run(id);
+  clearPublicCache();
   res.json({ ok: true });
 });
 
@@ -250,7 +268,7 @@ router.post('/news', requireAuth, async (req, res) => {
   if (!title) return res.status(400).json({ error: 'Заголовок обязателен' });
 
   const slug = ensureUniqueNewsSlug(body.slug || title);
-  const content = body.content || '';
+  const content = sanitizeHtml(body.content || '');
   const excerpt = body.excerpt
     ? String(body.excerpt)
     : stripHtml(content).slice(0, 200);
@@ -299,6 +317,7 @@ router.post('/news', requireAuth, async (req, res) => {
     );
   }
 
+  clearPublicCache();
   res.json({ ok: true, id: info.lastInsertRowid, autopost: autopostResult });
 });
 
@@ -315,7 +334,7 @@ router.put('/news/:id', requireAuth, requireNewsOwner, async (req, res) => {
   if (!slug) slug = makeSlug(title);
   if (slug !== existing.slug) slug = ensureUniqueNewsSlug(slug, id);
 
-  const content = body.content != null ? body.content : existing.content;
+  const content = body.content != null ? sanitizeHtml(body.content) : existing.content;
   const excerpt =
     body.excerpt != null
       ? String(body.excerpt)
@@ -377,12 +396,14 @@ router.put('/news/:id', requireAuth, requireNewsOwner, async (req, res) => {
     );
   }
 
+  clearPublicCache();
   res.json({ ok: true, id, autopost: autopostResult });
 });
 
 router.delete('/news/:id', requireAuth, requireOwner, (req, res) => {
   const id = Number(req.params.id);
   db.prepare('DELETE FROM news WHERE id = ?').run(id);
+  clearPublicCache();
   res.json({ ok: true });
 });
 
@@ -393,17 +414,35 @@ router.delete('/news/:id', requireAuth, requireOwner, (req, res) => {
 router.get('/public/search', (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.json({ results: [] });
-  const like = `%${q}%`;
-  const rows = db
-    .prepare(
+  try {
+    const ftsQuery = q
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((part) => `"${part.replace(/"/g, '""')}"`)
+      .join(' ');
+    const rows = db.prepare(
       `SELECT n.id, n.title, n.slug, n.published_at, c.name AS category_name, c.slug AS category_slug
-       FROM news n LEFT JOIN categories c ON c.id = n.category_id
-       WHERE n.status = 'published' AND (n.title LIKE ? OR n.excerpt LIKE ?)
-       ORDER BY n.published_at DESC
+       FROM news_fts f
+       JOIN news n ON n.id = f.rowid
+       LEFT JOIN categories c ON c.id = n.category_id
+       WHERE news_fts MATCH ? AND n.status = 'published'
+       ORDER BY bm25(news_fts), n.published_at DESC
        LIMIT 10`
-    )
-    .all(like, like);
-  res.json({ results: rows });
+    ).all(ftsQuery);
+    return res.json({ results: rows });
+  } catch (_) {
+    const like = `%${q}%`;
+    const rows = db
+      .prepare(
+        `SELECT n.id, n.title, n.slug, n.published_at, c.name AS category_name, c.slug AS category_slug
+         FROM news n LEFT JOIN categories c ON c.id = n.category_id
+         WHERE n.status = 'published' AND (n.title LIKE ? OR n.excerpt LIKE ?)
+         ORDER BY n.published_at DESC
+         LIMIT 10`
+      )
+      .all(like, like);
+    res.json({ results: rows });
+  }
 });
 
 // ─────────────────────────────────────────────
@@ -416,6 +455,7 @@ router.get('/settings', requireAuth, requireOwner, (req, res) => {
 
 router.put('/settings', requireAuth, requireOwner, (req, res) => {
   const updated = setSettings(req.body || {});
+  clearPublicCache();
   res.json({ ok: true, settings: updated });
 });
 

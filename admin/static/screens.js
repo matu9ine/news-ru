@@ -175,8 +175,7 @@
 
     // Main: title, slug, excerpt, content editor
     const titleInput = el('input', { type: 'text', placeholder: 'Заголовок новости', value: news?.title || '' });
-    titleInput.style.fontSize = '20px';
-    titleInput.style.fontWeight = '600';
+    titleInput.className = 'title-input';
     main.appendChild(el('div', { class: 'field' }, el('label', {}, 'Заголовок'), titleInput));
 
     const slugInput = el('input', { type: 'text', placeholder: 'auto', value: news?.slug || '' });
@@ -237,8 +236,12 @@
       el('div', { class: 'hint' }, 'Оставьте пустым для автоматической даты при публикации')
     ));
 
-    const saveBtn = el('button', { class: 'btn btn-primary btn-full' }, 'Сохранить');
-    side.appendChild(saveBtn);
+    const saveDraftBtn = el('button', { class: 'btn btn-full' }, 'Сохранить черновик');
+    const publishBtn = el('button', { class: 'btn btn-primary btn-full' }, 'Опубликовать');
+    const previewBtn = el('button', { class: 'btn btn-full' }, 'Предпросмотр');
+    side.appendChild(saveDraftBtn);
+    side.appendChild(publishBtn);
+    side.appendChild(previewBtn);
 
     if (news?.id) {
       const viewLink = el('a', {
@@ -250,9 +253,10 @@
       side.appendChild(viewLink);
     }
 
-    saveBtn.addEventListener('click', async () => {
-      saveBtn.disabled = true;
-      saveBtn.textContent = 'Сохранение…';
+    async function saveNews(statusOverride, clickedBtn) {
+      clickedBtn.disabled = true;
+      const originalText = clickedBtn.textContent;
+      clickedBtn.textContent = 'Сохранение…';
       autopostBox.innerHTML = '';
 
       const payload = {
@@ -265,15 +269,15 @@
         author_title: authorTitleInput.value.trim(),
         author_photo: authorPhotoPicker.getUrl() || null,
         category_id: catSel.value || null,
-        status: statusSel.value,
+        status: statusOverride || statusSel.value,
         is_breaking: breakingInput.checked,
         published_at: pubDateInput.value ? new Date(pubDateInput.value).toISOString() : null,
       };
 
       if (!payload.title) {
         toast('Введите заголовок', 'err');
-        saveBtn.disabled = false;
-        saveBtn.textContent = 'Сохранить';
+        clickedBtn.disabled = false;
+        clickedBtn.textContent = originalText;
         return;
       }
 
@@ -297,11 +301,56 @@
       } catch (err) {
         toast(err.message, 'err');
       } finally {
-        saveBtn.disabled = false;
-        saveBtn.textContent = 'Сохранить';
+        clickedBtn.disabled = false;
+        clickedBtn.textContent = originalText;
       }
-    });
+    }
+
+    saveDraftBtn.addEventListener('click', () => saveNews('draft', saveDraftBtn));
+    publishBtn.addEventListener('click', () => saveNews('published', publishBtn));
+    previewBtn.addEventListener('click', () => openPreview({
+      title: titleInput.value.trim(),
+      excerpt: excerptInput.value,
+      content: editor.getHTML(),
+      cover: coverPicker.getUrl(),
+      author: authorNameInput.value.trim(),
+      authorTitle: authorTitleInput.value.trim(),
+    }));
   };
+
+  function openPreview(data) {
+    const w = window.open('', '_blank');
+    if (!w) return toast('Браузер заблокировал окно предпросмотра', 'err');
+    w.document.write(`<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(data.title || 'Предпросмотр')}</title>
+<style>
+body{margin:0;background:#fff;color:#222;font-family:Arial,Helvetica,sans-serif}
+main{max-width:720px;margin:36px auto;padding:0 16px}
+h1{font-family:Georgia,"Times New Roman",serif;font-size:42px;line-height:1.08;margin:0 0 14px;color:#111}
+.lead{font-family:Georgia,"Times New Roman",serif;font-size:21px;line-height:1.42;color:#4d4d4d;margin:0 0 16px}
+.meta{border-top:1px solid #d9d9d9;border-bottom:1px solid #d9d9d9;padding:12px 0;margin:0 0 24px;color:#666;font-size:13px}
+img.cover{width:100%;max-height:500px;object-fit:cover;margin:0 0 24px}
+.body{font-family:Georgia,"Times New Roman",serif;font-size:20px;line-height:1.72}
+.body p{margin:0 0 21px}.body blockquote{background:#f7f7f5;border-left:4px solid #111;margin:28px 0;padding:18px 20px}
+.body table{width:100%;border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:15px}.body td,.body th{border:1px solid #d9d9d9;padding:10px}
+</style>
+</head>
+<body>
+<main>
+<h1>${escapeHtml(data.title || 'Без заголовка')}</h1>
+${data.excerpt ? `<p class="lead">${escapeHtml(data.excerpt)}</p>` : ''}
+<div class="meta">Автор: ${escapeHtml(data.author || 'Редакция')}${data.authorTitle ? ` / ${escapeHtml(data.authorTitle)}` : ''}</div>
+${data.cover ? `<img class="cover" src="${escapeHtml(data.cover)}" alt="">` : ''}
+<div class="body">${data.content || ''}</div>
+</main>
+</body>
+</html>`);
+    w.document.close();
+  }
 
   function renderAutopostStatus(container, ap) {
     const box = el('div', { class: 'autopost-status' });

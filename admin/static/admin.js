@@ -36,6 +36,9 @@
 
   async function api(method, url, body, isForm) {
     const opts = { method, credentials: 'same-origin', headers: {} };
+    if (method !== 'GET' && state.csrfToken) {
+      opts.headers['X-CSRF-Token'] = state.csrfToken;
+    }
     if (body !== undefined) {
       if (isForm) opts.body = body;
       else {
@@ -51,6 +54,7 @@
       err.status = res.status;
       throw err;
     }
+    if (data && data.csrfToken) state.csrfToken = data.csrfToken;
     return data;
   }
 
@@ -110,6 +114,7 @@
   const state = {
     me: null,
     categories: [],
+    csrfToken: '',
   };
 
   async function loadCategories() {
@@ -127,6 +132,7 @@
       try {
         const data = await api('GET', '/api/auth/me');
         state.me = data.admin || null;
+        state.csrfToken = data.csrfToken || state.csrfToken || '';
       } catch (_) { state.me = null; }
     }
 
@@ -167,6 +173,7 @@
           password: fd.get('password'),
         });
         state.me = data.admin;
+        state.csrfToken = data.csrfToken || '';
         navigate('/news');
       } catch (err) {
         errorBox.appendChild(el('div', { class: 'alert alert-error' }, err.message));
