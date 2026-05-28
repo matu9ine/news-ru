@@ -151,7 +151,7 @@ ${ogImg ? `<meta property="og:image" content="${escapeHtml(ogImg)}">` : ''}
 <meta name="twitter:description" content="${escapeHtml(desc)}">
 ${ogImg ? `<meta name="twitter:image" content="${escapeHtml(ogImg)}">` : ''}
 
-<link rel="stylesheet" href="/static/style.css?v=business-20260527-3">
+<link rel="stylesheet" href="/static/style.css?v=nyt-grid-20260528-1">
 ${extraHead}
 ${jsonLd ? `<script type="application/ld+json">${jsonLd}</script>` : ''}
 </head>

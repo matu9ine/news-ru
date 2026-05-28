@@ -6,7 +6,7 @@ const { getAllSettings } = require('../settings');
 const { getPublicCache, setPublicCache } = require('../cache');
 
 const router = express.Router();
-const PAGE_SIZE = 12;
+const PAGE_SIZE = 24;
 
 function siteBase(req) {
   return (process.env.SITE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
@@ -174,6 +174,67 @@ function newsCard(n, opts = {}) {
 </article>`;
 }
 
+function frontCard(n, variant = 'text') {
+  if (!n) return '';
+  const date = formatDateRu(n.published_at || n.created_at, false);
+  const excerpt = n.excerpt ? stripHtml(n.excerpt).slice(0, variant === 'lead' ? 260 : 150) : '';
+  const media = n.cover_image
+    ? `<a class="front-card-media" href="/news/${escapeHtml(n.slug)}"><img src="${escapeHtml(n.cover_image)}" alt="${escapeHtml(n.title)}" loading="lazy"></a>`
+    : '';
+  return `
+<article class="front-card front-card-${variant}">
+  ${(variant === 'lead' || variant === 'image' || variant === 'feature') ? media : ''}
+  <div class="front-card-body">
+    <div class="front-card-meta">
+      ${n.category_name ? `<a href="/category/${escapeHtml(n.category_slug)}">${escapeHtml(n.category_name)}</a>` : ''}
+      <span>${escapeHtml(date)}</span>
+    </div>
+    <h2 class="front-card-title"><a href="/news/${escapeHtml(n.slug)}">${escapeHtml(n.title)}</a></h2>
+    ${excerpt && variant !== 'mini' ? `<p class="front-card-excerpt">${escapeHtml(excerpt)}</p>` : ''}
+  </div>
+</article>`;
+}
+
+function renderFrontIssue(items) {
+  if (!items.length) return '<div class="empty"><p>Новостей пока нет.</p></div>';
+  const lead = items[0];
+  const left = items.slice(1, 4);
+  const right = items.slice(4, 7);
+  const river = items.slice(7, 15);
+  const rail = items.slice(15, 21);
+  const bottom = items.slice(21, 24);
+
+  return `
+<section class="front-issue" aria-label="Главные новости">
+  <div class="front-top">
+    <div class="front-column front-column-left">
+      ${left.map((n) => frontCard(n, 'text')).join('')}
+    </div>
+    <div class="front-lead">
+      ${frontCard(lead, 'lead')}
+    </div>
+    <div class="front-column front-column-right">
+      ${right.map((n, index) => frontCard(n, index === 0 ? 'image' : 'mini')).join('')}
+    </div>
+  </div>
+</section>
+
+<section class="front-river" aria-label="Новости дня">
+  <div class="front-river-main">
+    ${river.map((n, index) => frontCard(n, index % 3 === 0 ? 'feature' : 'text')).join('')}
+  </div>
+  <aside class="front-river-rail" aria-label="Коротко">
+    <h2 class="front-section-title">Коротко</h2>
+    ${rail.map((n) => frontCard(n, 'mini')).join('')}
+  </aside>
+</section>
+
+${bottom.length ? `
+<section class="front-strip" aria-label="Ещё материалы">
+  ${bottom.map((n) => frontCard(n, 'image')).join('')}
+</section>` : ''}`;
+}
+
 function searchArchiveBlock(q = '') {
   return `
 <section class="archive-search" aria-label="Поиск по архиву">
@@ -213,15 +274,16 @@ router.get('/', (req, res) => {
   const offset = (page - 1) * PAGE_SIZE;
   const items = getPublishedNews({ limit: PAGE_SIZE, offset });
   const total = countPublishedNews();
+  const isFrontPage = page === 1;
   const content = `
 <div class="container-wide">
   <header class="front-head">
-    <h1>Лента новостей</h1>
+    <h1>${isFrontPage ? 'Главные новости' : 'Лента новостей'}</h1>
   </header>
   ${searchArchiveBlock()}
-  <section class="chronology">
-    ${items.length ? items.map((n) => newsCard(n)).join('') : '<div class="empty"><p>Новостей пока нет.</p></div>'}
-  </section>
+  ${isFrontPage
+      ? renderFrontIssue(items)
+      : `<section class="chronology">${items.length ? items.map((n) => newsCard(n)).join('') : '<div class="empty"><p>Новостей пока нет.</p></div>'}</section>`}
   ${renderPagination(req, total, page, PAGE_SIZE)}
 </div>`;
 
