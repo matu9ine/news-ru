@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const sharp = require('sharp');
 const { db } = require('../db');
+const { UPLOADS_DIR } = require('../paths');
 const { makeSlug, stripHtml } = require('../utils');
 const { getAllSettings, setSettings } = require('../settings');
 const { autopost } = require('../autopost');
@@ -51,7 +52,6 @@ function requireNewsOwner(req, res, next) {
 // Uploads
 // ─────────────────────────────────────────────
 
-const UPLOADS_DIR = path.join(__dirname, '..', '..', 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 const upload = multer({
@@ -312,7 +312,7 @@ router.post('/news', requireAuth, async (req, res) => {
   let autopostResult = null;
   if (status === 'published') {
     autopostResult = await autopost(
-      { title, slug },
+      { id: info.lastInsertRowid, title, slug },
       process.env.SITE_URL || ''
     );
   }
@@ -391,7 +391,7 @@ router.put('/news/:id', requireAuth, requireNewsOwner, async (req, res) => {
   const becamePublished = existing.status !== 'published' && status === 'published';
   if (becamePublished) {
     autopostResult = await autopost(
-      { title, slug },
+      { id, title, slug },
       process.env.SITE_URL || ''
     );
   }
@@ -457,6 +457,18 @@ router.put('/settings', requireAuth, requireOwner, (req, res) => {
   const updated = setSettings(req.body || {});
   clearPublicCache();
   res.json({ ok: true, settings: updated });
+});
+
+router.get('/autopost-logs', requireAuth, requireOwner, (req, res) => {
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 30));
+  const rows = db.prepare(`
+    SELECT l.*, n.title AS news_title, n.slug AS news_slug
+    FROM autopost_logs l
+    LEFT JOIN news n ON n.id = l.news_id
+    ORDER BY l.created_at DESC, l.id DESC
+    LIMIT ?
+  `).all(limit);
+  res.json({ logs: rows });
 });
 
 // ─────────────────────────────────────────────

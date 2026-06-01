@@ -447,28 +447,10 @@ router.get('/robots.txt', (req, res) => {
   ].join('\n'));
 });
 
-router.get('/sitemap.xml', (req, res) => {
-  const cached = getPublicCache(req);
-  if (cached) return res.type('application/xml').send(cached);
-  const base = siteBase(req);
-  const cats = getAllCategories();
-  const news = db.prepare(
-    "SELECT slug, updated_at, published_at FROM news WHERE status = 'published' ORDER BY published_at DESC"
-  ).all();
+const SITEMAP_NEWS_LIMIT = 1000;
 
-  const urls = [
-    { loc: `${base}/`, changefreq: 'hourly', priority: '1.0' },
-    ...cats.map((c) => ({ loc: `${base}/category/${c.slug}`, changefreq: 'daily', priority: '0.7' })),
-    ...news.map((n) => ({
-      loc: `${base}/news/${n.slug}`,
-      lastmod: (n.updated_at || n.published_at || '').split(' ')[0] || undefined,
-      changefreq: 'daily',
-      priority: '0.8',
-    })),
-  ];
-
-  const xml =
-    '<?xml version="1.0" encoding="UTF-8"?>\n' +
+function sitemapUrlset(urls) {
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' +
     '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
     urls.map((u) =>
       `  <url>\n` +
@@ -479,7 +461,66 @@ router.get('/sitemap.xml', (req, res) => {
       `  </url>`
     ).join('\n') +
     '\n</urlset>\n';
+}
 
+router.get('/sitemap.xml', (req, res) => {
+  const cached = getPublicCache(req);
+  if (cached) return res.type('application/xml').send(cached);
+  const base = siteBase(req);
+  const total = countPublishedNews();
+  const chunks = Math.max(1, Math.ceil(total / SITEMAP_NEWS_LIMIT));
+  const maps = [
+    `${base}/sitemap-main.xml`,
+    ...Array.from({ length: chunks }, (_, i) => `${base}/sitemap-news-${i + 1}.xml`),
+  ];
+  const xml =
+    '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
+    maps.map((loc) =>
+      `  <sitemap>\n` +
+      `    <loc>${escapeHtml(loc)}</loc>\n` +
+      `  </sitemap>`
+    ).join('\n') +
+    '\n</sitemapindex>\n';
+
+  setPublicCache(req, xml, 10 * 60 * 1000);
+  res.type('application/xml').send(xml);
+});
+
+router.get('/sitemap-main.xml', (req, res) => {
+  const cached = getPublicCache(req);
+  if (cached) return res.type('application/xml').send(cached);
+  const base = siteBase(req);
+  const cats = getAllCategories();
+  const urls = [
+    { loc: `${base}/`, changefreq: 'hourly', priority: '1.0' },
+    ...cats.map((c) => ({ loc: `${base}/category/${c.slug}`, changefreq: 'daily', priority: '0.7' })),
+  ];
+  const xml = sitemapUrlset(urls);
+  setPublicCache(req, xml, 10 * 60 * 1000);
+  res.type('application/xml').send(xml);
+});
+
+router.get('/sitemap-news-:page.xml', (req, res) => {
+  const cached = getPublicCache(req);
+  if (cached) return res.type('application/xml').send(cached);
+  const page = Math.max(1, Number(req.params.page) || 1);
+  const offset = (page - 1) * SITEMAP_NEWS_LIMIT;
+  const base = siteBase(req);
+  const news = db.prepare(`
+    SELECT slug, updated_at, published_at
+    FROM news
+    WHERE status = 'published'
+    ORDER BY published_at DESC, id DESC
+    LIMIT ? OFFSET ?
+  `).all(SITEMAP_NEWS_LIMIT, offset);
+  const urls = news.map((n) => ({
+    loc: `${base}/news/${n.slug}`,
+    lastmod: (n.updated_at || n.published_at || '').split(' ')[0] || undefined,
+    changefreq: 'daily',
+    priority: '0.8',
+  }));
+  const xml = sitemapUrlset(urls);
   setPublicCache(req, xml, 10 * 60 * 1000);
   res.type('application/xml').send(xml);
 });

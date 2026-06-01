@@ -1,4 +1,27 @@
 const { getAllSettings } = require('./settings');
+const { db } = require('./db');
+
+const REQUEST_TIMEOUT_MS = 10000;
+
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function logAutopost(newsId, channel, result) {
+  const status = result?.ok ? 'sent' : result?.skipped ? 'skipped' : 'error';
+  const message = result?.reason || result?.error || '';
+  const externalId = result?.id == null ? '' : String(result.id);
+  db.prepare(
+    `INSERT INTO autopost_logs (news_id, channel, status, message, external_id)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(newsId || null, channel, status, message, externalId);
+}
 
 async function postToVK(news, url, settings) {
   const token = (settings.vk_access_token || '').trim();
@@ -15,7 +38,7 @@ async function postToVK(news, url, settings) {
       access_token: token,
       v: '5.199',
     });
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `https://api.vk.com/method/wall.post?${params.toString()}`,
       { method: 'GET' }
     );
@@ -40,7 +63,7 @@ async function postToTelegram(news, url, settings) {
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `https://api.telegram.org/bot${token}/sendMessage`,
       {
         method: 'POST',
@@ -66,16 +89,21 @@ async function postToTelegram(news, url, settings) {
 async function autopost(news, siteUrl) {
   const settings = getAllSettings();
   if (settings.autopost_enabled !== '1') {
-    return {
+    const skipped = {
       vk: { ok: false, skipped: true, reason: 'autopost disabled' },
       tg: { ok: false, skipped: true, reason: 'autopost disabled' },
     };
+    logAutopost(news.id, 'vk', skipped.vk);
+    logAutopost(news.id, 'telegram', skipped.tg);
+    return skipped;
   }
   const url = `${String(siteUrl || '').replace(/\/+$/, '')}/news/${news.slug}`;
   const [vk, tg] = await Promise.all([
     postToVK(news, url, settings),
     postToTelegram(news, url, settings),
   ]);
+  logAutopost(news.id, 'vk', vk);
+  logAutopost(news.id, 'telegram', tg);
   return { vk, tg };
 }
 

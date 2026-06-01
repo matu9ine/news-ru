@@ -1,4 +1,11 @@
 const crypto = require('crypto');
+let sanitizeHtmlLib = null;
+
+try {
+  sanitizeHtmlLib = require('sanitize-html');
+} catch (_) {
+  sanitizeHtmlLib = null;
+}
 
 const loginAttempts = new Map();
 
@@ -55,6 +62,30 @@ function requireCsrf(req, res, next) {
 
 function sanitizeHtml(html) {
   if (!html) return '';
+  if (sanitizeHtmlLib) {
+    return sanitizeHtmlLib(String(html), {
+      allowedTags: [
+        'p', 'br', 'strong', 'b', 'em', 'i', 'u', 's',
+        'h2', 'h3', 'blockquote', 'ul', 'ol', 'li',
+        'a', 'img', 'figure', 'figcaption',
+        'table', 'thead', 'tbody', 'tr', 'th', 'td',
+      ],
+      allowedAttributes: {
+        a: ['href', 'target', 'rel'],
+        img: ['src', 'alt', 'title', 'width', 'height', 'loading'],
+        th: ['colspan', 'rowspan'],
+        td: ['colspan', 'rowspan'],
+      },
+      allowedSchemes: ['http', 'https', 'mailto'],
+      allowedSchemesByTag: {
+        img: ['http', 'https', 'data'],
+      },
+      transformTags: {
+        a: sanitizeHtmlLib.simpleTransform('a', { rel: 'noopener noreferrer' }, true),
+        img: sanitizeHtmlLib.simpleTransform('img', { loading: 'lazy' }, true),
+      },
+    });
+  }
   let safe = String(html);
   safe = safe.replace(/<script[\s\S]*?<\/script>/gi, '');
   safe = safe.replace(/<style[\s\S]*?<\/style>/gi, '');

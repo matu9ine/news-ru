@@ -32,6 +32,21 @@
     return opts;
   }
 
+  function stripDangerousHtml(html) {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = String(html || '');
+    tpl.content.querySelectorAll('script, iframe, object, embed, style').forEach((node) => node.remove());
+    tpl.content.querySelectorAll('*').forEach((node) => {
+      for (const attr of Array.from(node.attributes)) {
+        const name = attr.name.toLowerCase();
+        const value = String(attr.value || '').trim().toLowerCase();
+        if (name.startsWith('on') || name === 'style') node.removeAttribute(attr.name);
+        if ((name === 'href' || name === 'src') && value.startsWith('javascript:')) node.removeAttribute(attr.name);
+      }
+    });
+    return tpl.innerHTML;
+  }
+
   // ─── Экран: список новостей ─────────────────────
 
   screens.news = async function (content) {
@@ -60,30 +75,43 @@
     content.appendChild(panel);
 
     let debounceT;
+    let page = 1;
+    const limit = 25;
     const loadAndRender = async () => {
       panel.innerHTML = '<div class="empty-state">Загрузка…</div>';
       const params = new URLSearchParams();
       if (searchInput.value) params.set('q', searchInput.value);
       if (statusSel.value) params.set('status', statusSel.value);
       if (catSel.value) params.set('category_id', catSel.value);
-      params.set('limit', '100');
+      params.set('page', String(page));
+      params.set('limit', String(limit));
       try {
         const data = await api('GET', '/api/news?' + params.toString());
-        renderTable(panel, data.news || [], loadAndRender);
+        renderTable(panel, data.news || [], {
+          total: data.total || 0,
+          page: data.page || page,
+          limit: data.limit || limit,
+          reload: loadAndRender,
+          onPage: (nextPage) => {
+            page = nextPage;
+            loadAndRender();
+          },
+        });
       } catch (err) {
         panel.innerHTML = '';
         panel.appendChild(el('div', { class: 'alert alert-error' }, err.message));
       }
     };
-    const debounced = () => { clearTimeout(debounceT); debounceT = setTimeout(loadAndRender, 200); };
+    const resetAndLoad = () => { page = 1; loadAndRender(); };
+    const debounced = () => { clearTimeout(debounceT); debounceT = setTimeout(resetAndLoad, 200); };
     searchInput.addEventListener('input', debounced);
-    statusSel.addEventListener('change', loadAndRender);
-    catSel.addEventListener('change', loadAndRender);
+    statusSel.addEventListener('change', resetAndLoad);
+    catSel.addEventListener('change', resetAndLoad);
 
     loadAndRender();
   };
 
-  function renderTable(panel, rows, reload) {
+  function renderTable(panel, rows, meta) {
     panel.innerHTML = '';
     if (!rows.length) {
       panel.appendChild(el('div', { class: 'empty-state' }, 'Ничего не найдено. Создайте первую новость.'));
@@ -129,7 +157,7 @@
             try {
               await api('DELETE', `/api/news/${n.id}`);
               toast('Новость удалена');
-              reload();
+              meta.reload();
             } catch (e) { toast(e.message, 'err'); }
           },
         }, 'Удалить'));
@@ -139,6 +167,21 @@
     }
     table.appendChild(tbody);
     panel.appendChild(table);
+    const pages = Math.max(1, Math.ceil((meta.total || 0) / (meta.limit || 25)));
+    const pager = el('div', { class: 'admin-pagination' },
+      el('button', {
+        class: 'btn btn-sm',
+        disabled: meta.page <= 1,
+        onclick: () => meta.onPage(Math.max(1, meta.page - 1)),
+      }, 'Назад'),
+      el('span', {}, `${meta.page} / ${pages} · всего ${meta.total || rows.length}`),
+      el('button', {
+        class: 'btn btn-sm',
+        disabled: meta.page >= pages,
+        onclick: () => meta.onPage(Math.min(pages, meta.page + 1)),
+      }, 'Дальше')
+    );
+    panel.appendChild(pager);
   }
 
   // ─── Экран: редактирование новости ─────────────
@@ -345,7 +388,7 @@ img.cover{width:100%;max-height:500px;object-fit:cover;margin:0 0 24px}
 ${data.excerpt ? `<p class="lead">${escapeHtml(data.excerpt)}</p>` : ''}
 <div class="meta">Автор: ${escapeHtml(data.author || 'Редакция')}${data.authorTitle ? ` / ${escapeHtml(data.authorTitle)}` : ''}</div>
 ${data.cover ? `<img class="cover" src="${escapeHtml(data.cover)}" alt="">` : ''}
-<div class="body">${data.content || ''}</div>
+<div class="body">${stripDangerousHtml(data.content)}</div>
 </main>
 </body>
 </html>`);

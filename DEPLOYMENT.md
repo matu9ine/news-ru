@@ -10,6 +10,8 @@ PORT=3000
 SITE_URL=https://your-domain.ru
 SESSION_SECRET=<длинная случайная строка>
 INITIAL_ADMIN_LOGIN=admin
+DATA_DIR=/var/www/kaspiyskiy-kurier/data
+UPLOADS_DIR=/var/www/kaspiyskiy-kurier/uploads
 INITIAL_ADMIN_PASSWORD=<сложный пароль>
 ```
 
@@ -52,6 +54,14 @@ SSL можно выпустить через `certbot`.
 
 ```powershell
 npm run backup
+```
+
+Перед копированием база делает SQLite WAL checkpoint. Скрипт читает `DATA_DIR` и `UPLOADS_DIR` из `.env`, поэтому на production можно хранить данные вне папки приложения.
+
+Для старых изображений после переноса можно один раз выполнить:
+
+```bash
+npm run migrate:images
 ```
 
 Скрипт создаёт папку `backups/<дата>` и копирует:

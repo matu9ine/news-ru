@@ -80,6 +80,8 @@ SITE_URL=http://localhost:3000
 SESSION_SECRET=<секрет для сессий>
 INITIAL_ADMIN_LOGIN=admin
 INITIAL_ADMIN_PASSWORD=admin123
+DATA_DIR=data
+UPLOADS_DIR=uploads
 ```
 
 Токены VK и Telegram задаются через админку, не в `.env`.
@@ -90,6 +92,15 @@ INITIAL_ADMIN_PASSWORD=admin123
 - WYSIWYG проходит базовую санитарную очистку перед сохранением.
 - Для деплоя, PM2, Nginx, SSL и бэкапов см. `DEPLOYMENT.md`.
 - Для домена `.ru` и платного хостинга нужны данные владельца и доступ к регистратору/хостингу. Код готов к запуску на домене через переменную `SITE_URL`.
-# news-ru
-# news-ru
-# news-ru
+## Обслуживание
+
+```bash
+npm run migrate:images
+npm run backup
+```
+
+`DATA_DIR` и `UPLOADS_DIR` можно вынести за пределы папки проекта. Это важно для production: при обновлении кода база и изображения останутся на месте.
+
+`migrate:images` конвертирует старые JPG/PNG/GIF/TIFF/BMP из uploads в WebP и обновляет ссылки в базе. Исходные файлы не удаляются.
+
+`backup` делает checkpoint SQLite WAL, копирует базу и архивирует uploads.

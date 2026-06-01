@@ -2,8 +2,8 @@ const path = require('path');
 const fs = require('fs');
 const Database = require('better-sqlite3');
 const bcrypt = require('bcryptjs');
+const { DATA_DIR } = require('./paths');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const DB_FILE = path.join(DATA_DIR, 'news.sqlite');
@@ -68,6 +68,19 @@ function migrate() {
       key TEXT PRIMARY KEY,
       value TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS autopost_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      news_id INTEGER,
+      channel TEXT NOT NULL,
+      status TEXT NOT NULL,
+      message TEXT,
+      external_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (news_id) REFERENCES news(id) ON DELETE SET NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_autopost_logs_news ON autopost_logs(news_id, created_at DESC);
   `);
 
   const columns = [
@@ -165,6 +178,9 @@ function seed() {
   if (adminCount === 0) {
     const login = process.env.INITIAL_ADMIN_LOGIN || 'admin';
     const pass = process.env.INITIAL_ADMIN_PASSWORD || 'admin123';
+    if (process.env.NODE_ENV === 'production' && (!process.env.INITIAL_ADMIN_PASSWORD || pass === 'admin123')) {
+      throw new Error('INITIAL_ADMIN_PASSWORD must be set to a strong non-default value in production');
+    }
     const hash = bcrypt.hashSync(pass, 10);
     db.prepare(
       'INSERT INTO admins (login, password_hash, role) VALUES (?, ?, ?)'

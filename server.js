@@ -5,7 +5,17 @@ const express = require('express');
 const session = require('express-session');
 
 const { init: initDb } = require('./src/db');
+const { UPLOADS_DIR } = require('./src/paths');
 const { SQLiteSessionStore } = require('./src/session-store');
+
+if (
+  process.env.NODE_ENV === 'production' &&
+  (!process.env.SESSION_SECRET ||
+    process.env.SESSION_SECRET === 'dev-secret' ||
+    process.env.SESSION_SECRET === 'change-me-please-in-production')
+) {
+  throw new Error('SESSION_SECRET must be set to a strong non-default value in production');
+}
 
 initDb();
 
@@ -35,7 +45,7 @@ app.use(
 
 // Статика
 app.use('/static', express.static(path.join(__dirname, 'public', 'static'), { maxAge: '7d' }));
-app.use('/uploads', express.static(path.join(__dirname, 'uploads'), { maxAge: '30d' }));
+app.use('/uploads', express.static(UPLOADS_DIR, { maxAge: '30d' }));
 app.use('/admin/static', express.static(path.join(__dirname, 'admin', 'static'), { maxAge: '7d' }));
 
 // API
@@ -52,7 +62,10 @@ app.use('/', require('./src/routes/public'));
 app.use((err, req, res, next) => {
   console.error('[error]', err);
   if (req.path.startsWith('/api')) {
-    return res.status(500).json({ error: err.message || 'Внутренняя ошибка' });
+    const message = process.env.NODE_ENV === 'production'
+      ? 'Internal server error'
+      : (err.message || 'Internal server error');
+    return res.status(500).json({ error: message });
   }
   res.status(500).send('Внутренняя ошибка сервера');
 });
